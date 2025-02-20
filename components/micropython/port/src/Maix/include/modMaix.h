@@ -25,6 +25,7 @@ extern const mp_obj_type_t Maix_i2s_type;
 extern const mp_obj_type_t Maix_audio_type;
 extern const mp_obj_type_t Maix_fft_type;
 extern const mp_obj_type_t Maix_mic_array_type;
+extern const mp_obj_type_t Maix_apu_type;
 extern const mp_obj_type_t cpufreq_type;
 extern const mp_obj_type_t Maix_utils_type;
 extern const mp_obj_type_t Maix_config_type;

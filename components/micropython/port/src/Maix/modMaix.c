@@ -29,6 +29,7 @@ STATIC const mp_rom_map_elem_t maix_module_globals_table[] = {
 #if CONFIG_MAIXPY_MIC_ARRAY_ENABLE
     { MP_ROM_QSTR(MP_QSTR_MIC_ARRAY),  MP_ROM_PTR(&Maix_mic_array_type) },
 #endif
+    { MP_ROM_QSTR(MP_QSTR_APU),  MP_ROM_PTR(&Maix_apu_type) },
     { MP_ROM_QSTR(MP_QSTR_freq),  MP_ROM_PTR(&cpufreq_type) },
     { MP_ROM_QSTR(MP_QSTR_utils),  MP_ROM_PTR(&Maix_utils_type) },
     { MP_ROM_QSTR(MP_QSTR_config),  MP_ROM_PTR(&Maix_config_type) },
@@ -43,4 +44,3 @@ const mp_obj_module_t maix_module = {
     .base = { &mp_type_module },
     .globals = (mp_obj_dict_t*)&maix_module_globals,
 };
-
