@@ -203,9 +203,15 @@ STATIC mp_obj_t Maix_apu_dir_clear_ready(void) {
 MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_dir_clear_ready_obj, Maix_apu_dir_clear_ready);
 
 // Get direction with confidence level
+// Returns (direction, power, voc_dir, samples, voc_samples, sector_power) -- a 6th element
+// (sector_power, a 16-int list of the power in every direction sector) was added so callers can do
+// sub-sector interpolation using the argmax direction's neighbors; these values come from the same
+// dir_logic() pass as direction/power, so they're always consistent with each other. Existing
+// callers that unpack this tuple by position (e.g. iron_kaput/lib_apu_and_step.py) need updating
+// to accept 6 values instead of 5.
 STATIC mp_obj_t Maix_apu_get_direction(void) {
     apu_dir_result_t result = lib_apu_get_direction();
-    
+
     // Create a new list for samples
     mp_obj_list_t *samples_list = MP_OBJ_TO_PTR(mp_obj_new_list(0, NULL));
     for(int i = 0; i < APU_DIR_CHANNEL_SIZE; i++) {
@@ -214,19 +220,25 @@ STATIC mp_obj_t Maix_apu_get_direction(void) {
 
     // Create a new list for VOC samples
     mp_obj_list_t *voc_samples_list = MP_OBJ_TO_PTR(mp_obj_new_list(0, NULL));
-    for(int i = 0; i < APU_DIR_CHANNEL_SIZE; i++) {
+    for(int i = 0; i < APU_VOC_CHANNEL_SIZE; i++) {
         mp_obj_list_append(voc_samples_list, mp_obj_new_int(result.voc_samples[i]));
     }
-    
-    mp_obj_t tuple[5] = {
+
+    // Create a list for per-sector power across all APU_DIR_CHANNEL_MAX directions
+    mp_obj_t sector_power_list = mp_obj_new_list(APU_DIR_CHANNEL_MAX, NULL);
+    for (int i = 0; i < APU_DIR_CHANNEL_MAX; i++) {
+        mp_obj_list_store(sector_power_list, MP_OBJ_NEW_SMALL_INT(i), mp_obj_new_int(result.sector_power[i]));
+    }
+
+    mp_obj_t tuple[6] = {
         mp_obj_new_int(result.direction),
         mp_obj_new_int(result.power),
         mp_obj_new_int(result.voc_dir),
         MP_OBJ_FROM_PTR(samples_list),
         MP_OBJ_FROM_PTR(voc_samples_list),
-        
+        sector_power_list,
     };
-    return mp_obj_new_tuple(5, tuple);
+    return mp_obj_new_tuple(6, tuple);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_get_direction_obj, Maix_apu_get_direction);
 
@@ -266,25 +278,30 @@ STATIC mp_obj_t Maix_apu_reset(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_reset_obj, Maix_apu_reset);
 
-// Helper function to convert Python list to FIR coefficients
+// Helper function to convert Python list to FIR coefficients.
+// Was hardcoded to 16 -- the underlying vendor apu_*_set_*_fir() functions actually read
+// APU_FIR_TAP_COUNT (17) taps (they pack 2 taps per register across 9 registers, with only the very
+// last tap forced to 0). A 16-element buffer left the 17th tap reading one element past the end of
+// this array on every call, silently programming hardware with whatever stack memory happened to
+// follow it. Fixed by matching the real tap count throughout.
 STATIC void list_to_fir_coefficients(mp_obj_t list_obj, uint16_t* coefficients) {
     size_t len;
     mp_obj_t *items;
     mp_obj_get_array(list_obj, &len, &items);
-    
-    if (len != 16) {
-        mp_raise_ValueError("[MAIXPY]APU: FIR coefficients must be a list of 16 integers");
+
+    if (len != APU_FIR_TAP_COUNT) {
+        mp_raise_ValueError("[MAIXPY]APU: FIR coefficients must be a list of 17 integers");
     }
-    
-    for (int i = 0; i < 16; i++) {
+
+    for (int i = 0; i < APU_FIR_TAP_COUNT; i++) {
         coefficients[i] = mp_obj_get_int(items[i]);
     }
 }
 
 // Helper function to convert FIR coefficients to Python list
 STATIC mp_obj_t fir_coefficients_to_list(const uint16_t* coefficients) {
-    mp_obj_t list = mp_obj_new_list(16, NULL);
-    for (int i = 0; i < 16; i++) {
+    mp_obj_t list = mp_obj_new_list(APU_FIR_TAP_COUNT, NULL);
+    for (int i = 0; i < APU_FIR_TAP_COUNT; i++) {
         mp_obj_list_store(list, MP_OBJ_NEW_SMALL_INT(i), MP_OBJ_NEW_SMALL_INT(coefficients[i]));
     }
     return list;
@@ -292,7 +309,7 @@ STATIC mp_obj_t fir_coefficients_to_list(const uint16_t* coefficients) {
 
 // Set direction detection pre-FIR coefficients
 STATIC mp_obj_t Maix_apu_set_dir_pre_fir(mp_obj_t coefficients_obj) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     list_to_fir_coefficients(coefficients_obj, coefficients);
     lib_apu_set_dir_pre_fir(coefficients);
     return mp_const_none;
@@ -301,7 +318,7 @@ MP_DEFINE_CONST_FUN_OBJ_1(Maix_apu_set_dir_pre_fir_obj, Maix_apu_set_dir_pre_fir
 
 // Set direction detection post-FIR coefficients
 STATIC mp_obj_t Maix_apu_set_dir_post_fir(mp_obj_t coefficients_obj) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     list_to_fir_coefficients(coefficients_obj, coefficients);
     lib_apu_set_dir_post_fir(coefficients);
     return mp_const_none;
@@ -310,7 +327,7 @@ MP_DEFINE_CONST_FUN_OBJ_1(Maix_apu_set_dir_post_fir_obj, Maix_apu_set_dir_post_f
 
 // Set voice output pre-FIR coefficients
 STATIC mp_obj_t Maix_apu_set_voice_pre_fir(mp_obj_t coefficients_obj) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     list_to_fir_coefficients(coefficients_obj, coefficients);
     lib_apu_set_voice_pre_fir(coefficients);
     return mp_const_none;
@@ -319,7 +336,7 @@ MP_DEFINE_CONST_FUN_OBJ_1(Maix_apu_set_voice_pre_fir_obj, Maix_apu_set_voice_pre
 
 // Set voice output post-FIR coefficients
 STATIC mp_obj_t Maix_apu_set_voice_post_fir(mp_obj_t coefficients_obj) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     list_to_fir_coefficients(coefficients_obj, coefficients);
     lib_apu_set_voice_post_fir(coefficients);
     return mp_const_none;
@@ -328,7 +345,7 @@ MP_DEFINE_CONST_FUN_OBJ_1(Maix_apu_set_voice_post_fir_obj, Maix_apu_set_voice_po
 
 // Get direction detection pre-FIR coefficients
 STATIC mp_obj_t Maix_apu_get_dir_pre_fir(void) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     lib_apu_get_dir_pre_fir(coefficients);
     return fir_coefficients_to_list(coefficients);
 }
@@ -336,7 +353,7 @@ MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_get_dir_pre_fir_obj, Maix_apu_get_dir_pre_fir
 
 // Get direction detection post-FIR coefficients
 STATIC mp_obj_t Maix_apu_get_dir_post_fir(void) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     lib_apu_get_dir_post_fir(coefficients);
     return fir_coefficients_to_list(coefficients);
 }
@@ -344,7 +361,7 @@ MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_get_dir_post_fir_obj, Maix_apu_get_dir_post_f
 
 // Get voice output pre-FIR coefficients
 STATIC mp_obj_t Maix_apu_get_voice_pre_fir(void) {
-    uint16_t coefficients[16];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     lib_apu_get_voice_pre_fir(coefficients);
     return fir_coefficients_to_list(coefficients);
 }
@@ -352,7 +369,7 @@ MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_get_voice_pre_fir_obj, Maix_apu_get_voice_pre
 
 // Get voice output post-FIR coefficients
 STATIC mp_obj_t Maix_apu_get_voice_post_fir(void) {
-    uint16_t coefficients[9];
+    uint16_t coefficients[APU_FIR_TAP_COUNT];
     lib_apu_get_voice_post_fir(coefficients);
     return fir_coefficients_to_list(coefficients);
 }

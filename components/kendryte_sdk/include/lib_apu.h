@@ -95,6 +95,13 @@
 #define APU_DIR_CHANNEL_SIZE 512
 #define APU_VOC_CHANNEL_SIZE 512
 
+// Vendor apu_dir_set_prev_fir/apu_dir_set_post_fir/apu_voc_set_prev_fir/apu_voc_set_post_fir pack
+// coefficients 2-per-register across 9 registers (bf_pre_fir0_coef[9] etc.), with the very last
+// tap (register 8's second tap) always forced to 0 by the driver. That leaves 17 real, caller-
+// controlled taps (indices 0..16) -- NOT 16. Every buffer that holds a FIR coefficient array,
+// on both the C and MicroPython side, must be sized APU_FIR_TAP_COUNT, not a bare 16.
+#define APU_FIR_TAP_COUNT 17
+
 #if APU_FFT_ENABLE
 extern uint32_t APU_DIR_FFT_BUFFER[APU_DIR_CHANNEL_MAX]
 				       [APU_DIR_CHANNEL_SIZE]
@@ -132,8 +139,11 @@ void lib_apu_start_direction_detection(void);
 
 // Get current direction with confidence level
 typedef struct {
-    en_bf_dir_t direction;  // Detected direction
-    int32_t power;          // Signal power in the detected direction
+    en_bf_dir_t direction;  // Detected direction (argmax sector)
+    int32_t power;          // Signal power in the detected direction (== sector_power[direction])
+    int32_t sector_power[APU_DIR_CHANNEL_MAX]; // Power for all 16 sectors from the same dir_logic() pass as
+                                                // direction/power above, so a caller doing sub-sector
+                                                // interpolation always compares values from one consistent frame.
     int16_t samples[APU_DIR_CHANNEL_SIZE];
     int16_t voc_samples[APU_DIR_CHANNEL_SIZE];
     en_bf_dir_t voc_dir;
@@ -160,28 +170,28 @@ void lib_apu_set_source_mode(uint8_t mode);
 // Reset APU
 void lib_apu_reset(void);
 
-// Set direction detection pre-FIR coefficients
+// Set direction detection pre-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_set_dir_pre_fir(const uint16_t* coefficients);
 
-// Set direction detection post-FIR coefficients
+// Set direction detection post-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_set_dir_post_fir(const uint16_t* coefficients);
 
-// Set voice output pre-FIR coefficients
+// Set voice output pre-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_set_voice_pre_fir(const uint16_t* coefficients);
 
-// Set voice output post-FIR coefficients
+// Set voice output post-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_set_voice_post_fir(const uint16_t* coefficients);
 
-// Get direction detection pre-FIR coefficients
+// Get direction detection pre-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_get_dir_pre_fir(uint16_t* coefficients);
 
-// Get direction detection post-FIR coefficients
+// Get direction detection post-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_get_dir_post_fir(uint16_t* coefficients);
 
-// Get voice output pre-FIR coefficients
+// Get voice output pre-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_get_voice_pre_fir(uint16_t* coefficients);
 
-// Get voice output post-FIR coefficients
+// Get voice output post-FIR coefficients. `coefficients` must point to APU_FIR_TAP_COUNT (17) taps.
 void lib_apu_get_voice_post_fir(uint16_t* coefficients);
 
 // Set down-sizing ratio for direction searching

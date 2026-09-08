@@ -2,6 +2,13 @@
 #include <math.h>
 #include "lib_apu.h"
 
+// The vendor apu.c defines these with external linkage but omits them from apu.h -- forward-declared
+// here rather than editing the kendryte-standalone-sdk submodule. Both are the *correct*,
+// read-modify-write-safe siblings of functions this file used to call by mistake (see
+// lib_apu_init_apu and lib_apu_set_source_mode below).
+extern void apu_channel_enable(uint8_t channel_bit);
+extern void apu_set_src_mode(uint8_t src_mode);
+
 uint64_t logic_count;
 uint64_t dir_logic_count;
 uint64_t voc_logic_count;
@@ -514,7 +521,6 @@ void lib_apu_set_led(uint32_t degree, uint32_t color, uint32_t delay) {
 
 int dir_logic(apu_dir_result_t *result)
 {
-	int32_t dir_sum = 0;
 	int32_t dir_max = 0;
 	uint16_t contex = 0;
 
@@ -524,16 +530,23 @@ int dir_logic(apu_dir_result_t *result)
 	}
 
 	for (size_t ch = 0; ch < APU_DIR_CHANNEL_MAX; ch++) { //
+		// int64_t + reset per channel: the previous int32_t accumulator (a) was never reset
+		// between channels, letting each channel's comparison value carry a small (~1/512)
+		// contamination from the previous channel's leftover, and (b) could overflow int32_t
+		// on loud/near-clipping input (512 samples near full-scale int16 sums to ~5.5e11,
+		// vs. int32_t max ~2.1e9).
+		int64_t dir_sum = 0;
 
         for (size_t i = 0; i < APU_DIR_CHANNEL_SIZE; i++) { //
-                dir_sum += (int32_t)APU_DIR_BUFFER[ch][i] * (int32_t)APU_DIR_BUFFER[ch][i];
+                dir_sum += (int64_t)APU_DIR_BUFFER[ch][i] * (int64_t)APU_DIR_BUFFER[ch][i];
         }
         dir_sum = dir_sum / APU_DIR_CHANNEL_SIZE;
+        result->sector_power[ch] = (int32_t)dir_sum; // safe: max ~1.07e9 post-division, well within int32_t
         if(dir_sum > dir_max){
-            dir_max = dir_sum;
+            dir_max = (int32_t)dir_sum;
             contex = ch;
         }
-  
+
     }
 
     for (size_t i = 0; i < APU_DIR_CHANNEL_SIZE; i++) { //
@@ -606,9 +619,13 @@ apu_dir_result_t lib_apu_get_direction(void)
 
 // Initialize APU device
 void lib_apu_init_apu(uint16_t gain, uint8_t channels) {
-    // Configure APU gain and channels
+    // Configure APU gain and channels.
+    // Note: apu_channel_enable() (not the similarly-named apu_set_channel_enabled()) -- the latter
+    // writes an uninitialized local apu_ch_cfg_t straight to hardware, leaving data_src_mode and its
+    // write-enable bit as stack garbage. apu_channel_enable() reads the register first and clears the
+    // other write-enable bits explicitly, so this call can't have side effects on unrelated fields.
     apu_set_audio_gain(gain);
-    apu_set_channel_enabled(channels);
+    apu_channel_enable(channels);
 }
 
 void lib_apu_start_direction_detection(void) {
@@ -638,11 +655,13 @@ void lib_apu_disable_voice_output(void) {
 
 void lib_apu_set_source_mode(uint8_t mode)
 {
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
-    
-    // Set the write enable bit and the mode
-    apu_reg->bf_ch_cfg_reg.we_data_src_mode = 1;
-    apu_reg->bf_ch_cfg_reg.data_src_mode = mode & 0x1;
+    // Was: two separate bitfield writes through a raw pointer, with no initial read and no
+    // clearing of the other we_* bits. we_data_src_mode is a one-shot, self-clearing write-enable,
+    // so the second write (setting data_src_mode) landed with we_data_src_mode already cleared by
+    // the first write -- hardware discarded the intended value. apu_set_src_mode() does the correct
+    // single atomic read-modify-write (read whole register, clear the other we_* bits, set both
+    // we_data_src_mode and data_src_mode together, write back once).
+    apu_set_src_mode(mode & 0x1);
 }
 
 void lib_apu_reset(void) {
@@ -680,45 +699,52 @@ void lib_apu_set_voice_post_fir(const uint16_t* coefficients)
     apu_voc_set_post_fir((uint16_t*)coefficients);
 }
 
+// The previous "register access issue" these four getters were stubbed out for was simply wrong
+// field/member names: apu_fir_coef_t has fir_tap0/fir_tap1, not a single .coef member, and the last
+// getter referenced a register (bf_voice_post_fir_coef) that doesn't exist -- the real one is
+// bf_post_fir1_coef. Fixed below, unpacking each 9-register bank back into APU_FIR_TAP_COUNT (17)
+// taps using the exact inverse of how the *_set_*_fir setters pack them (fir_coef[i*2]/[i*2+1] for
+// i in 0..8, with i==8's second tap skipped -- it's always forced to 0 on write, and writing/reading
+// index 17 would be one past the 17-element buffer).
+
 void lib_apu_get_dir_pre_fir(uint16_t* coefficients)
 {
-    /*
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
     for (int i = 0; i < 9; i++) {
-        coefficients[i] = apu_reg->bf_pre_fir0_coef[i].coef;
+        coefficients[i * 2] = apu->bf_pre_fir0_coef[i].fir_tap0;
+        if (i < 8) {
+            coefficients[i * 2 + 1] = apu->bf_pre_fir0_coef[i].fir_tap1;
+        }
     }
-    */
 }
 
 void lib_apu_get_dir_post_fir(uint16_t* coefficients)
 {
-    /*
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
     for (int i = 0; i < 9; i++) {
-        coefficients[i] = apu_reg->bf_post_fir0_coef[i].coef;
+        coefficients[i * 2] = apu->bf_post_fir0_coef[i].fir_tap0;
+        if (i < 8) {
+            coefficients[i * 2 + 1] = apu->bf_post_fir0_coef[i].fir_tap1;
+        }
     }
-    */
 }
 
 void lib_apu_get_voice_pre_fir(uint16_t* coefficients)
 {
-    /*
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
     for (int i = 0; i < 9; i++) {
-        coefficients[i] = apu_reg->bf_pre_fir1_coef[i].coef;
+        coefficients[i * 2] = apu->bf_pre_fir1_coef[i].fir_tap0;
+        if (i < 8) {
+            coefficients[i * 2 + 1] = apu->bf_pre_fir1_coef[i].fir_tap1;
+        }
     }
-    */
 }
 
 void lib_apu_get_voice_post_fir(uint16_t* coefficients)
 {
-    // Implementation commented out until register access issue is resolved
-    /*
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
     for (int i = 0; i < 9; i++) {
-        coefficients[i] = apu_reg->bf_voice_post_fir_coef[i].coef;
+        coefficients[i * 2] = apu->bf_post_fir1_coef[i].fir_tap0;
+        if (i < 8) {
+            coefficients[i * 2 + 1] = apu->bf_post_fir1_coef[i].fir_tap1;
+        }
     }
-    */
 }
 
 void lib_apu_dir_set_down_size(uint8_t dir_dwn_size)
