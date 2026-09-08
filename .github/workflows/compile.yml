@@ -32,23 +32,5 @@ jobs:
           wget https://github.com/kendryte/kendryte-gnu-toolchain/releases/download/v8.2.0-20190409/kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz
           sudo tar -Jxf kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz -C /opt
           rm -f kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz
-          # This CI check only needs to confirm maixpy_k210 (the project relevant to lib_apu/APU work)
-          # actually compiles. tools/release/release.sh builds ~11 project/config combinations
-          # sequentially (maixpy_k210 plain + with_lvgl, maixpy_k210_minimum x4, m5stickv, twatch,
-          # amigo_ips x2, amigo_tft x2) for real releases -- still used as-is by publish.yml, unchanged
-          # here, just not what a fast compile-only check needs.
-          cd projects/maixpy_k210
-          python project.py distclean
-          python project.py build
-
-      # Makes the built firmware downloadable from the run's "Artifacts" section -- otherwise the
-      # .bin/.elf only ever exist inside this ephemeral runner and are lost when the job ends.
-      - name: upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: maixpy_k210-firmware-${{ github.sha }}
-          path: |
-            projects/maixpy_k210/build/maixpy.bin
-            projects/maixpy_k210/build/maixpy.elf
-          if-no-files-found: error
-
+          cd tools/release
+          chmod +x release.sh && ./release.sh

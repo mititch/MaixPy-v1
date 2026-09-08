@@ -1,0 +1,63 @@
+# On-demand firmware build: pick a branch and a single project, run it from the Actions tab.
+# Never triggers automatically (workflow_dispatch only) -- exists specifically so builds only
+# consume free-plan Actions minutes when explicitly requested, unlike compile.yml (which auto-runs
+# on every push to develop / PR to master and builds via tools/release/release.sh, ~11 project
+# configs sequentially).
+
+name: Manual firmware build
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch (or any git ref) to build'
+        required: true
+        default: 'develop'
+        type: string
+      project:
+        description: 'Project under projects/ to build'
+        required: true
+        default: 'maixpy_k210'
+        type: choice
+        options:
+          - maixpy_k210
+          - maixpy_k210_minimum
+          - maixpy_amigo_ips
+          - maixpy_amigo_tft
+          - maixpy_m5stickv
+          - maixpy_twatch
+
+jobs:
+  build:
+    name: build ${{ inputs.project }} @ ${{ inputs.branch }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout ${{ inputs.branch }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+
+      - name: install kendryte toolchain
+        run: |
+          wget https://github.com/kendryte/kendryte-gnu-toolchain/releases/download/v8.2.0-20190409/kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz
+          sudo tar -Jxf kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz -C /opt
+          rm -f kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz
+
+      - name: build ${{ inputs.project }}
+        run: |
+          cd projects/${{ inputs.project }}
+          python project.py distclean
+          python project.py build
+
+      # Makes the built firmware downloadable from the run's "Artifacts" section -- otherwise the
+      # .bin/.elf only ever exist inside this ephemeral runner and are lost when the job ends.
+      - name: upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project }}-firmware-${{ inputs.branch }}-${{ github.sha }}
+          path: |
+            projects/${{ inputs.project }}/build/maixpy.bin
+            projects/${{ inputs.project }}/build/maixpy.elf
+          if-no-files-found: error
