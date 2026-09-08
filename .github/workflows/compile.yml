@@ -41,3 +41,14 @@ jobs:
           python project.py distclean
           python project.py build
 
+      # Makes the built firmware downloadable from the run's "Artifacts" section -- otherwise the
+      # .bin/.elf only ever exist inside this ephemeral runner and are lost when the job ends.
+      - name: upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maixpy_k210-firmware-${{ github.sha }}
+          path: |
+            projects/maixpy_k210/build/maixpy.bin
+            projects/maixpy_k210/build/maixpy.elf
+          if-no-files-found: error
+
