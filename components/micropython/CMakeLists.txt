@@ -472,16 +472,19 @@ if(CONFIG_COMPONENT_MICROPYTHON_ENABLE)
         )
     add_custom_target(gen_mpy_cross
             # CFLAGS_EXTRA (a hook mpy-cross's own Makefile already provides, see
-            # components/micropython/core/mpy-cross/Makefile) downgrades -Wdangling-pointer back to
-            # a warning for this host-side build tool only. That check was added in GCC 12 and flags
-            # py/stackctrl.c's mp_stack_ctrl_init() -- which deliberately stores a stack-local
-            # variable's address as a stack-depth marker, a standard, safe pattern GCC's new heuristic
-            # can't tell isn't a real dangling-pointer bug -- as a hard -Werror failure on newer host
-            # toolchains (e.g. current GitHub Actions ubuntu-latest) that didn't exist when this vendored
-            # MicroPython core (a git submodule) was last touched. Doesn't affect the actual K210 firmware
-            # build, which uses the separately-downloaded, older, pinned kendryte-toolchain, not the host
-            # compiler -- only this native build-time helper binary.
-            COMMAND ${CMAKE_MAKE_PROGRAM} -C ${mpy_core_dir}/mpy-cross CFLAGS_EXTRA=-Wno-error=dangling-pointer
+            # components/micropython/core/mpy-cross/Makefile) downgrades this host-side build tool's
+            # -Werror back to non-fatal warnings. mpy-cross's own CWARN already forces -Werror
+            # unconditionally; this vendored MicroPython core (a git submodule, last touched ~2019) was
+            # written against host GCC of that era and reliably fails that -Werror bar under newer host
+            # compilers (confirmed hitting two different, unrelated new GCC diagnostics in a row here --
+            # -Wdangling-pointer added in GCC 12, then -Wenum-int-mismatch -- both false positives on old
+            # but harmless code, e.g. main.c's mp_import_stat prototype mismatch). Rather than allowlist
+            # one new warning at a time as GitHub Actions' ubuntu-latest keeps moving its GCC version
+            # forward, disable fatal-on-warning here specifically: -Wno-error still leaves every warning
+            # printed in the build log for visibility, it just stops treating them as build failures.
+            # Doesn't affect the actual K210 firmware build, which uses the separately-downloaded, older,
+            # pinned kendryte-toolchain, not the host compiler -- only this native build-time helper binary.
+            COMMAND ${CMAKE_MAKE_PROGRAM} -C ${mpy_core_dir}/mpy-cross CFLAGS_EXTRA=-Wno-error
             COMMENT "Generate mpy-cross ..."
         )
     separate_arguments(cmd_sed0 NATIVE_COMMAND "s/^Q(.*)/\"&\"/")
