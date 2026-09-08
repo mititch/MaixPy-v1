@@ -1,22 +1,173 @@
 #include <stdio.h>
+#include <math.h>
 #include "lib_apu.h"
-#include "sysctl.h"
-#include "apu.h"
-#include "i2s.h"
-#include "plic.h"
-#include "dmac.h"
-#include "fpioa.h"
 
-// Aligned buffer for APU data (4 channels)
-static int16_t APU_DIR_BUFFER[4][512] __attribute__((aligned(128)));
+uint64_t logic_count;
+uint64_t dir_logic_count;
+uint64_t voc_logic_count;
 
-static int apu_dir_int_handler(void* ctx)
+#if APU_FFT_ENABLE
+uint32_t APU_DIR_FFT_BUFFER[APU_DIR_CHANNEL_MAX]
+				[APU_DIR_CHANNEL_SIZE]
+	__attribute__((aligned(128)));
+uint32_t APU_VOC_FFT_BUFFER[APU_VOC_CHANNEL_SIZE]
+	__attribute__((aligned(128)));
+#else
+int16_t APU_DIR_BUFFER[APU_DIR_CHANNEL_MAX][APU_DIR_CHANNEL_SIZE]
+	__attribute__((aligned(128)));
+int16_t APU_VOC_BUFFER[APU_VOC_CHANNEL_SIZE]
+	__attribute__((aligned(128)));
+#endif
+
+
+// CALLBACKS REGION START
+
+int int_apu(void *ctx)
 {
-    apu_dir_clear_int_state();
-    return 0;
+	apu_int_stat_t rdy_reg = apu->bf_int_stat_reg;
+
+	if (rdy_reg.dir_search_data_rdy) {
+		apu_dir_clear_int_state();
+
+#if APU_FFT_ENABLE
+		static int ch;
+
+		ch = (ch + 1) % 16;
+		for (uint32_t i = 0; i < 512; i++) { //
+			uint32_t data = apu->sobuf_dma_rdata;
+
+			APU_DIR_FFT_BUFFER[ch][i] = data;
+		}
+		if (ch == 0) { //
+			dir_logic_count++;
+		}
+#else
+		for (uint32_t ch = 0; ch < APU_DIR_CHANNEL_MAX; ch++) {
+			for (uint32_t i = 0; i < 256; i++) { //
+				uint32_t data = apu->sobuf_dma_rdata;
+
+				APU_DIR_BUFFER[ch][i * 2 + 0] =
+					data & 0xffff;
+				APU_DIR_BUFFER[ch][i * 2 + 1] =
+					(data >> 16) & 0xffff;
+			}
+		}
+		dir_logic_count++;
+#endif
+
+	} else if (rdy_reg.voc_buf_data_rdy) {
+		apu_voc_clear_int_state();
+
+#if APU_FFT_ENABLE
+		for (uint32_t i = 0; i < 512; i++) { //
+			uint32_t data = apu->vobuf_dma_rdata;
+
+			APU_VOC_FFT_BUFFER[i] = data;
+		}
+#else
+		for (uint32_t i = 0; i < 256; i++) { //
+			uint32_t data = apu->vobuf_dma_rdata;
+
+			APU_VOC_BUFFER[i * 2 + 0] = data & 0xffff;
+			APU_VOC_BUFFER[i * 2 + 1] = (data >> 16) & 0xffff;
+		}
+#endif
+
+		voc_logic_count++;
+	} else { //
+		printf("[waring]: unknown %s interrupt cause.\n", __func__);
+	}
+	return 0;
 }
 
+#if APU_DMA_ENABLE
+int int_apu_dir_dma(void *ctx)
+{
+	uint64_t chx_intstatus =
+		dmac->channel[APU_DIR_DMA_CHANNEL].intstatus;
+	if (chx_intstatus & 0x02) {
+		dmac_wait_idle(APU_DIR_DMA_CHANNEL); // ME instead dmac_chanel_interrupt_clear(APU_DIR_DMA_CHANNEL);
+		
+
+#if APU_FFT_ENABLE
+		static int ch;
+
+		ch = (ch + 1) % 16;
+		dmac->channel[APU_DIR_DMA_CHANNEL].dar =
+			(uint64_t)APU_DIR_FFT_BUFFER[ch];
+#else
+		dmac->channel[APU_DIR_DMA_CHANNEL].dar =
+			(uint64_t)APU_DIR_BUFFER;
+#endif
+
+		dmac->chen = 0x0101 << APU_DIR_DMA_CHANNEL;
+
+#if APU_FFT_ENABLE
+		if (ch == 0) { //
+			dir_logic_count++;
+		}
+#else
+		dir_logic_count++;
+#endif
+
+	} else {
+		printf("[warning] unknown dma interrupt. %lx %lx\n",
+		       dmac->intstatus, dmac->com_intstatus);
+		printf("dir intstatus: %lx\n", chx_intstatus);
+
+		dmac_wait_idle(APU_DIR_DMA_CHANNEL); // Me instead dmac_chanel_interrupt_clear();
+		
+	}
+	return 0;
+}
+
+
+int int_apu_voc_dma(void *ctx)
+{
+	uint64_t chx_intstatus =
+		dmac->channel[APU_VOC_DMA_CHANNEL].intstatus;
+
+	if (chx_intstatus & 0x02) {
+		dmac_wait_idle(APU_VOC_DMA_CHANNEL); // Me instead dmac_chanel_interrupt_clear(APU_VOC_DMA_CHANNEL);
+		
+
+#if APU_FFT_ENABLE
+		dmac->channel[APU_VOC_DMA_CHANNEL].dar =
+			(uint64_t)APU_VOC_FFT_BUFFER;
+#else
+		dmac->channel[APU_VOC_DMA_CHANNEL].dar =
+			(uint64_t)APU_VOC_BUFFER;
+#endif
+
+		dmac->chen = 0x0101 << APU_VOC_DMA_CHANNEL;
+
+
+		voc_logic_count++;
+
+	} else {
+		printf("[warning] unknown dma interrupt. %lx %lx\n",
+		       dmac->intstatus, dmac->com_intstatus);
+		printf("voc intstatus: %lx\n", chx_intstatus);
+
+		dmac_wait_idle(APU_VOC_DMA_CHANNEL); // Me instead dmac_chanel_interrupt_clear(APU_VOC_DMA_CHANNEL);
+	}
+	return 0;
+}
+#endif
+
+// CALLBACKS REGION END
+
+
+
+// Initialize PLL2 for APU
+// used in ALL
+void lib_apu_init_clock(uint32_t freq) {
+    sysctl_pll_set_freq(SYSCTL_PLL2, freq);
+}
+
+
 // Initialize FPIOA pins for I2S
+// used in ALL
 void lib_apu_init_fpioa(int i2s_d0_pin, int i2s_d1_pin,
                               int i2s_d2_pin, int i2s_d3_pin,
                               int i2s_ws_pin, int i2s_sclk_pin) {
@@ -36,23 +187,422 @@ void lib_apu_init_fpioa(int i2s_d0_pin, int i2s_d1_pin,
         fpioa_set_function(i2s_sclk_pin, FUNC_I2S0_SCLK);
 }
 
+// Initialize PLIC (Platform-Level Interrupt Controller)
+// used in ALL
+void lib_apu_init_plic(uint32_t priority)
+{
+	//plic_init(); already called in maixpy_main.c
+#if APU_DMA_ENABLE
+	// dma
+	plic_set_priority(IRQN_DMA0_INTERRUPT + APU_DIR_DMA_CHANNEL, priority);
+	plic_irq_register(IRQN_DMA0_INTERRUPT + APU_DIR_DMA_CHANNEL,
+			  int_apu_dir_dma, NULL);
+	plic_irq_enable(IRQN_DMA0_INTERRUPT + APU_DIR_DMA_CHANNEL);
+	// dma
+	plic_set_priority(IRQN_DMA0_INTERRUPT + APU_VOC_DMA_CHANNEL, priority);
+	plic_irq_register(IRQN_DMA0_INTERRUPT + APU_VOC_DMA_CHANNEL,
+			  int_apu_voc_dma, NULL);
+	plic_irq_enable(IRQN_DMA0_INTERRUPT + APU_VOC_DMA_CHANNEL);
+#else
+	plic_set_priority(IRQN_I2S0_INTERRUPT, priority);
+	plic_irq_enable(IRQN_I2S0_INTERRUPT);
+	plic_irq_register(IRQN_I2S0_INTERRUPT, int_apu, NULL);
+#endif
+}
+
 // Initialize I2S device
+// used in ALL
 void lib_apu_init_i2s(uint32_t sample_rate) {
-    // Initialize I2S0 for 4 channels (this also enables the I2S clock)
-    i2s_init(I2S_DEVICE_0, I2S_RECEIVER, 0xF);
-    
-    // Configure I2S channels
-    for (int i = 0; i < 4; i++) {
-        i2s_rx_channel_config(I2S_DEVICE_0,
-                            I2S_CHANNEL_0 + i,      // Channel number
-                            RESOLUTION_16_BIT,       // 16-bit resolution
-                            SCLK_CYCLES_32,         // Word select size (32 cycles)
-                            TRIGGER_LEVEL_4,        // DMA trigger level
-                            STANDARD_MODE);         // Standard I2S mode
-    }
+	/* I2s init */
+    i2s_init(I2S_DEVICE_0, I2S_RECEIVER, 0x3);
+
+    i2s_rx_channel_config(I2S_DEVICE_0, I2S_CHANNEL_0,
+            RESOLUTION_16_BIT, SCLK_CYCLES_32,
+            TRIGGER_LEVEL_4, STANDARD_MODE);
+    i2s_rx_channel_config(I2S_DEVICE_0, I2S_CHANNEL_1,
+            RESOLUTION_16_BIT, SCLK_CYCLES_32,
+            TRIGGER_LEVEL_4, STANDARD_MODE);
+    i2s_rx_channel_config(I2S_DEVICE_0, I2S_CHANNEL_2,
+            RESOLUTION_16_BIT, SCLK_CYCLES_32,
+            TRIGGER_LEVEL_4, STANDARD_MODE);
+    i2s_rx_channel_config(I2S_DEVICE_0, I2S_CHANNEL_3,
+            RESOLUTION_16_BIT, SCLK_CYCLES_32,
+            TRIGGER_LEVEL_4, STANDARD_MODE);
 
     i2s_set_sample_rate(I2S_DEVICE_0, sample_rate);
 }
+
+// Initialize BF and array params
+// used in ALL
+void init_bf(void)
+{
+	uint16_t fir_prev_t[] = {
+		0x020b, 0x0401, 0xff60, 0xfae2, 0xf860, 0x0022,
+		0x10e6, 0x22f1, 0x2a98, 0x22f1, 0x10e6, 0x0022,
+		0xf860, 0xfae2, 0xff60, 0x0401, 0x020b,
+	};
+	uint16_t fir_post_t[] = {
+		0xf649, 0xe59e, 0xd156, 0xc615, 0xd12c, 0xf732,
+		0x2daf, 0x5e03, 0x7151, 0x5e03, 0x2daf, 0xf732,
+		0xd12c, 0xc615, 0xd156, 0xe59e, 0xf649,
+	};
+
+	uint16_t fir_neg_one[] = {
+		0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+	};
+
+	uint16_t fir_common[] = {
+		0x03c3, 0x03c3, 0x03c3, 0x03c3, 0x03c3, 0x03c3,
+		0x03c3, 0x03c3, 0x03c3, 0x03c3, 0x03c3, 0x03c3,
+		0x03c3, 0x03c3, 0x03c3, 0x03c3, 0x03c3,
+	};
+//3cm
+	// uint8_t offsets[16][8] = {
+	// 	{0, 1, 5, 7, 7, 5, 1, 4, },
+	// 	{0, 0, 3, 6, 7, 6, 3, 4, },
+	// 	{1, 0, 2, 5, 8, 7, 4, 4, },
+	// 	{2, 0, 1, 4, 7, 8, 6, 4, },
+	// 	{4, 1, 0, 2, 6, 8, 7, 4, },
+	// 	{5, 2, 0, 1, 4, 7, 8, 4, },
+	// 	{6, 3, 0, 0, 2, 6, 7, 4, },
+	// 	{7, 5, 1, 0, 1, 5, 7, 4, },
+	// 	{7, 6, 3, 0, 0, 3, 6, 4, },
+	// 	{8, 7, 4, 1, 0, 2, 5, 4, },
+	// 	{7, 8, 6, 2, 0, 1, 4, 4, },
+	// 	{6, 8, 7, 4, 1, 0, 2, 4, },
+	// 	{4, 7, 8, 5, 2, 0, 1, 4, },
+	// 	{3, 6, 7, 6, 3, 0, 0, 4, },
+	// 	{1, 5, 7, 7, 5, 1, 0, 4, },
+	// 	{0, 3, 6, 7, 6, 2, 0, 4, },
+	// };
+
+	apu_dir_set_prev_fir(fir_neg_one);
+	apu_dir_set_post_fir(fir_neg_one);
+	apu_voc_set_prev_fir(fir_neg_one);
+	apu_voc_set_post_fir(fir_neg_one);
+
+	apu_set_delay(4, 7, 1);
+	apu_set_smpl_shift(APU_SMPL_SHIFT);
+	apu_voc_set_saturation_limit(APU_SATURATION_VPOS_DEBUG,
+					  APU_SATURATION_VNEG_DEBUG);
+	apu_set_audio_gain(APU_AUDIO_GAIN_TEST);
+	apu_voc_set_direction(0); //- temporally not managed (always takes from 0 dirrection)
+	apu_set_channel_enabled(0x3f);
+	apu_set_down_size(0, 0);
+
+#if APU_FFT_ENABLE
+	apu_set_fft_shift_factor(1, 0xaa);
+#else
+	apu_set_fft_shift_factor(0, 0);
+#endif
+
+	apu_set_interrupt_mask(APU_DMA_ENABLE, APU_DMA_ENABLE);
+#if APU_DIR_ENABLE
+	apu_dir_enable();
+#endif
+#if APU_VOC_ENABLE
+	apu_voc_enable(1);
+#else
+	apu_voc_enable(0);
+#endif
+}
+
+
+#if APU_DMA_ENABLE
+void init_dma(void)
+{
+	// dmac enable dmac and interrupt
+	/*
+	union dmac_cfg_u dmac_cfg;
+	dmac_cfg.data = readq(&dmac->cfg);
+	dmac_cfg.cfg.dmac_en = 1;
+	dmac_cfg.cfg.int_en = 1;
+	writeq(dmac_cfg.data, &dmac->cfg);
+	*/ // ME this logic is copy of dmac_enable(); called in void dmac_init(void); from maixpy_main.c
+
+	sysctl_dma_select(SYSCTL_DMA_CHANNEL_0 + APU_DIR_DMA_CHANNEL,
+			  SYSCTL_DMA_SELECT_I2S0_BF_DIR_REQ);
+	sysctl_dma_select(SYSCTL_DMA_CHANNEL_0 + APU_VOC_DMA_CHANNEL,
+			  SYSCTL_DMA_SELECT_I2S0_BF_VOICE_REQ);
+}
+#endif
+
+void init_dma_ch(int ch, volatile uint32_t *src_reg, void *buffer,
+		 size_t size_of_byte)
+{
+	printf("%s %d\n", __func__, ch);
+
+	dmac->channel[ch].sar = (uint64_t)src_reg;
+	dmac->channel[ch].dar = (uint64_t)buffer;
+	dmac->channel[ch].block_ts = (size_of_byte / 4) - 1;
+	dmac->channel[ch].ctl =
+		(((uint64_t)1 << 47) | ((uint64_t)15 << 48)
+		 | ((uint64_t)1 << 38) | ((uint64_t)15 << 39)
+		 | ((uint64_t)3 << 18) | ((uint64_t)3 << 14)
+		 | ((uint64_t)2 << 11) | ((uint64_t)2 << 8) | ((uint64_t)0 << 6)
+		 | ((uint64_t)1 << 4) | ((uint64_t)1 << 2) | ((uint64_t)1));
+	/*
+	 * dmac->channel[ch].ctl = ((  wburst_len_en  ) |
+	 *                        (    wburst_len   ) |
+	 *                        (  rburst_len_en  ) |
+	 *                        (    rburst_len   ) |
+	 *                        (one transaction:d) |
+	 *                        (one transaction:s) |
+	 *                        (    dst width    ) |
+	 *                        (    src width   ) |
+	 *                        (    dinc,0 inc  )|
+	 *                        (  sinc:1,no inc ));
+	 */
+
+	dmac->channel[ch].cfg = (((uint64_t)1 << 49) | ((uint64_t)ch << 44)
+				 | ((uint64_t)ch << 39) | ((uint64_t)2 << 32));
+	/*
+	 * dmac->channel[ch].cfg = ((     prior       ) |
+	 *                         (      dst_per    ) |
+	 *                         (     src_per     )  |
+	 *           (    peri to mem  ));
+	 *  01: Reload
+	 */
+
+	dmac->channel[ch].intstatus_en = 0x2; // 0xFFFFFFFF;
+	dmac->channel[ch].intclear = 0xFFFFFFFF;
+
+	dmac->chen = 0x0101 << ch;
+}
+
+
+
+void lib_apu_init_all(int i2s_d0_pin, int i2s_d1_pin,
+                  int i2s_d2_pin, int i2s_d3_pin,
+                  int i2s_ws_pin, int i2s_sclk_pin) {
+    
+    printf("Init ALL start...\n");
+
+    // 1. Set system clock
+    lib_apu_init_clock(45158400UL);
+    printf("Clock init done.\n");
+    msleep(100);
+
+    // 2. Disable IRQ
+    sysctl_disable_irq();
+    printf("IRQ disabled.\n");
+    msleep(100);
+
+    // 3. Initialize FPIOA pins
+    lib_apu_init_fpioa(i2s_d0_pin, i2s_d1_pin, i2s_d2_pin, i2s_d3_pin, i2s_ws_pin, i2s_sclk_pin);
+    printf("FPIOA init done.\n");
+    msleep(100);
+
+    // 4. Initialize interrupts and callbacks
+    lib_apu_init_plic(4);
+    printf("PLIC init done.\n");
+    msleep(100);
+
+    // 5. Initialize I2S
+    lib_apu_init_i2s(44100);
+    printf("I2S init done.\n");
+    msleep(100);
+
+    // 6. Initialize APU
+    init_bf();
+    printf("APU BF init done.\n");
+    msleep(100);
+
+    // 7. Initialize DMA
+    if (APU_DMA_ENABLE) {
+        #if APU_DMA_ENABLE
+		init_dma();
+        #endif
+#if APU_FFT_ENABLE
+		init_dma_ch(APU_DIR_DMA_CHANNEL,
+			    &apu->sobuf_dma_rdata,
+			    APU_DIR_FFT_BUFFER[0], 512 * 4);
+		init_dma_ch(APU_VOC_DMA_CHANNEL,
+			    &apu->vobuf_dma_rdata, APU_VOC_FFT_BUFFER,
+			    512 * 4);
+#else
+		init_dma_ch(APU_DIR_DMA_CHANNEL,
+			    &apu->sobuf_dma_rdata, APU_DIR_BUFFER,
+			    512 * 16 * 2);
+		init_dma_ch(APU_VOC_DMA_CHANNEL,
+			    &apu->vobuf_dma_rdata, APU_VOC_BUFFER,
+			    512 * 2);
+#endif
+        printf("DMA init done.\n");
+        msleep(100);
+	}
+
+    // 8. Enable IRQ
+    sysctl_enable_irq();
+    printf("Enable IRQ.\n");
+    msleep(100);
+
+    //apu_print_setting();
+    //msleep(500);
+
+    printf("Init ALL done!\n");
+    msleep(100);
+}
+
+
+void lib_apu_init_led(int sk9822_dat_pin, int sk9822_clk_pin) {
+    
+    printf("Init LED start...\n");
+
+    fpioa_set_function(sk9822_dat_pin, FUNC_GPIOHS0 + SK9822_DAT_GPIONUM);
+    fpioa_set_function(sk9822_clk_pin, FUNC_GPIOHS0 + SK9822_CLK_GPIONUM);
+    printf("FPIOA init done.\n");
+    msleep(100);
+
+    sipeed_init_mic_array_led();
+    printf("Init ALL done!\n");
+    msleep(100);
+}
+
+
+
+
+// LED LOGIC START
+
+void lib_apu_set_led(uint32_t degree, uint32_t color, uint32_t delay) {
+    
+    uint8_t led_num = (uint8_t)round(degree * 12 / 360);
+
+    uint32_t led_color;
+
+    if (color == 0) {
+        led_color = 0xffeec900; //LIGHT BLUE
+    } else if (color == 1) {
+        led_color = 0xffff0000; //BLUE
+    } else if (color == 2) {
+        led_color = 0xff00ff00; //GREEN
+    } else if (color == 3) {
+        led_color = 0xff0000ff; //RED
+    } else  {
+        led_color = 0xffff0000;
+    }
+
+    led_color |= 0xe0000000;
+
+    uint8_t index;
+    int led_colors[12] = {0};
+    for (index = 0; index < 12; index++)
+    {
+        led_colors[index] = index == led_num ? led_color : 0xe0000000;
+    }
+    
+    sk9822_start_frame();
+    for (index = 0; index < 12; index++)
+    {
+        sk9822_send_data(led_colors[index]);
+    }
+    sk9822_stop_frame();
+    if (delay > 0) {
+        msleep(delay);
+    }
+    
+}
+
+// LED LOGIC END
+
+
+
+
+
+
+// LOOP LOGIC START
+
+int dir_logic(apu_dir_result_t *result)
+{
+	int32_t dir_sum = 0;
+	int32_t dir_max = 0;
+	uint16_t contex = 0;
+
+	logic_count++;
+	if (logic_count > 10) {
+		logic_count = 0;
+	}
+
+	for (size_t ch = 0; ch < APU_DIR_CHANNEL_MAX; ch++) { //
+
+        for (size_t i = 0; i < APU_DIR_CHANNEL_SIZE; i++) { //
+                dir_sum += (int32_t)APU_DIR_BUFFER[ch][i] * (int32_t)APU_DIR_BUFFER[ch][i];
+        }
+        dir_sum = dir_sum / APU_DIR_CHANNEL_SIZE;
+        if(dir_sum > dir_max){
+            dir_max = dir_sum;
+            contex = ch;
+        }
+  
+    }
+
+    for (size_t i = 0; i < APU_DIR_CHANNEL_SIZE; i++) { //
+        result->samples[i] = APU_DIR_BUFFER[contex][i];
+    }
+
+    if (logic_count == 100) {
+        printf("--- %d   %d\n", contex, dir_max);
+    }
+    
+    result->direction = (en_bf_dir_t)contex; // Assign a direction
+    result->power = dir_max;                 // Assign a power value
+	apu_dir_enable();
+	return 0;
+}
+
+int voc_logic(apu_dir_result_t *result)
+{
+	
+	result->voc_dir = (en_bf_dir_t)(apu->bf_ch_cfg_reg.bf_target_dir);
+
+	for (size_t i = 0; i < APU_DIR_CHANNEL_SIZE; i++) { //
+        result->voc_samples[i] = APU_VOC_BUFFER[i];
+    }
+
+	return 0;
+}
+
+apu_dir_result_t lib_apu_get_direction(void)
+{
+	uint8_t waiting = 1;
+    apu_dir_result_t result;
+
+    while (waiting) {
+		if (dir_logic_count > 0) {
+			dir_logic(&result);
+            waiting = 0;
+			while (--dir_logic_count != 0) {
+				printf("[warning]: %s, restart before prev callback has end\n",
+				       "dir_logic");
+			}
+		}
+		if (voc_logic_count > 0) {
+			voc_logic(&result);
+			while (--voc_logic_count != 0) {
+				printf("[warning]: %s, restart before prev callback has end\n",
+				       "voc_logic");
+			}
+		}
+	}
+	return result;
+}
+
+// LOOP LOGIC END
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Initialize APU device
 void lib_apu_init_apu(uint16_t gain, uint8_t channels) {
@@ -61,67 +611,16 @@ void lib_apu_init_apu(uint16_t gain, uint8_t channels) {
     apu_set_channel_enabled(channels);
 }
 
-// Initialize PLIC (Platform-Level Interrupt Controller)
-void lib_apu_init_plic(uint32_t priority) {
-    //plic_init();
-    plic_set_priority(IRQN_I2S0_INTERRUPT, priority);
-    plic_irq_register(IRQN_I2S0_INTERRUPT, apu_dir_int_handler, NULL);
-    plic_irq_enable(IRQN_I2S0_INTERRUPT);
-}
-
-// Initialize PLL2 for APU
-void lib_apu_init_clock(uint32_t freq) {
-    sysctl_pll_set_freq(SYSCTL_PLL2, freq);
-}
-
-void lib_apu_init(uint16_t gain, uint8_t channels,
-                  int i2s_d0_pin, int i2s_d1_pin,
-                  int i2s_d2_pin, int i2s_d3_pin,
-                  int i2s_ws_pin, int i2s_sclk_pin) {
-    // 1. Set system clock
-    lib_apu_init_clock(45158400UL);
-    
-    // 2. Initialize FPIOA pins
-    lib_apu_init_fpioa(i2s_d0_pin, i2s_d1_pin, i2s_d2_pin, i2s_d3_pin,
-                       i2s_ws_pin, i2s_sclk_pin);
-
-    // 5. Initialize PLIC with default priority 4
-    lib_apu_init_plic(4);
-    
-    // 3. Initialize I2S with default 44.1kHz
-    lib_apu_init_i2s(44100);
-    
-    // 4. Initialize APU
-    lib_apu_init_apu(gain, channels);
-    
-}
-
 void lib_apu_start_direction_detection(void) {
     // Clear any previous interrupt state
-    apu_dir_clear_int_state();
+    // apu_dir_clear_int_state();
     // Start direction detection
     apu_dir_enable();
 }
 
 uint8_t lib_apu_dir_is_ready(void) {
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
-    return apu_reg->bf_int_stat_reg.dir_search_data_rdy;
-}
-
-apu_dir_result_t lib_apu_get_direction(void) {
-    apu_dir_result_t result = {0};
-    volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
-    
-    // Read direction from channel config register
-    result.direction = (en_bf_dir_t)(apu_reg->bf_ch_cfg_reg.bf_target_dir);
-    
-    // Extract confidence (10 bits) from interrupt status
-    result.confidence = (apu_reg->bf_int_stat_reg.dir_search_data_rdy) ? 1023 : 0;
-    
-    // Extract power from saturation counter
-    result.power = apu_reg->saturation_counter;
-    
-    return result;
+    //volatile apu_reg_t* apu_reg = (volatile apu_reg_t*)0x50250200;
+    return apu->bf_int_stat_reg.dir_search_data_rdy;
 }
 
 void lib_apu_dir_clear_ready(void) {
@@ -270,4 +769,10 @@ void lib_apu_voc_set_saturation_limit(uint16_t upper, uint16_t bottom)
 uint32_t lib_apu_voc_get_saturation_limit(void)
 {
     return apu_voc_get_saturation_limit();
+}
+
+void lib_apu_print_setting(void) 
+{
+    // Call the APU driver's print_setting function
+    apu_print_setting();
 }

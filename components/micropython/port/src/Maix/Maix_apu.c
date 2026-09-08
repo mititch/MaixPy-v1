@@ -21,11 +21,14 @@
 #include "py/mphal.h"
 #include "modMaix.h"
 #include "lib_apu.h"
+//#include "apu_demo.h"
 
 const mp_obj_type_t Maix_apu_type;
 
 // Forward declarations
-STATIC mp_obj_t Maix_apu_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
+STATIC mp_obj_t Maix_apu_init_all(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
+STATIC mp_obj_t Maix_apu_init_led(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
+STATIC mp_obj_t Maix_apu_set_led(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
 STATIC mp_obj_t Maix_apu_init_clock(mp_obj_t freq_obj);
 STATIC mp_obj_t Maix_apu_init_fpioa(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
 STATIC mp_obj_t Maix_apu_init_i2s(mp_obj_t sample_rate_obj);
@@ -58,11 +61,13 @@ STATIC mp_obj_t Maix_apu_voc_reset_saturation_counter(void);
 STATIC mp_obj_t Maix_apu_voc_get_saturation_counter(void);
 STATIC mp_obj_t Maix_apu_voc_set_saturation_limit(mp_obj_t upper_obj, mp_obj_t bottom_obj);
 STATIC mp_obj_t Maix_apu_voc_get_saturation_limit(void);
+STATIC mp_obj_t Maix_apu_print_settings(void);
+/*STATIC mp_obj_t Maix_apu_demo_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args);
+STATIC mp_obj_t Maix_apu_demo_run(void);*/
+
 
 // APU initialization arguments
-STATIC const mp_arg_t Maix_apu_init_args[] = {
-    { MP_QSTR_gain,     MP_ARG_INT, {.u_int = 96} },
-    { MP_QSTR_channels, MP_ARG_INT, {.u_int = 0xFF} },
+STATIC const mp_arg_t Maix_apu_init_all_args[] = {
     { MP_QSTR_i2s_d0,   MP_ARG_INT, {.u_int = 23} },
     { MP_QSTR_i2s_d1,   MP_ARG_INT, {.u_int = 22} },
     { MP_QSTR_i2s_d2,   MP_ARG_INT, {.u_int = 21} },
@@ -71,31 +76,64 @@ STATIC const mp_arg_t Maix_apu_init_args[] = {
     { MP_QSTR_i2s_sclk, MP_ARG_INT, {.u_int = 18} },
 };
 
+// LED initialization arguments
+STATIC const mp_arg_t Maix_apu_init_led_args[] = {
+    { MP_QSTR_sk9822_dat, MP_ARG_INT, {.u_int = 24} },
+    { MP_QSTR_sk9822_clk, MP_ARG_INT, {.u_int = 25} },
+};
+
 // APU initialization function
-STATIC mp_obj_t Maix_apu_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
-    mp_arg_val_t args[MP_ARRAY_SIZE(Maix_apu_init_args)];
-    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(Maix_apu_init_args), Maix_apu_init_args, args);
+STATIC mp_obj_t Maix_apu_init_all(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    mp_arg_val_t args[MP_ARRAY_SIZE(Maix_apu_init_all_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(Maix_apu_init_all_args), Maix_apu_init_all_args, args);
 
     // Get the arguments
-    int gain = args[0].u_int;
-    int channels = args[1].u_int;
-    int i2s_d0 = args[2].u_int;
-    int i2s_d1 = args[3].u_int;
-    int i2s_d2 = args[4].u_int;
-    int i2s_d3 = args[5].u_int;
-    int i2s_ws = args[6].u_int;
-    int i2s_sclk = args[7].u_int;
+    int i2s_d0 = args[0].u_int;
+    int i2s_d1 = args[1].u_int;
+    int i2s_d2 = args[2].u_int;
+    int i2s_d3 = args[3].u_int;
+    int i2s_ws = args[4].u_int;
+    int i2s_sclk = args[5].u_int;
 
     // Initialize APU with default settings
-    lib_apu_init_clock(45158400);  // 45.1584MHz for 44.1kHz audio
-    lib_apu_init_fpioa(i2s_d0, i2s_d1, i2s_d2, i2s_d3, i2s_ws, i2s_sclk);
-    lib_apu_init_plic(4);  // Default priority 4
-    lib_apu_init_i2s(44100);  // Default 44.1kHz sample rate
-    lib_apu_init_apu(gain, channels);
-
+    lib_apu_init_all(i2s_d0, i2s_d1, i2s_d2, i2s_d3, i2s_ws, i2s_sclk);
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_KW(Maix_apu_init_obj, 0, Maix_apu_init);
+MP_DEFINE_CONST_FUN_OBJ_KW(Maix_apu_init_all_obj, 0, Maix_apu_init_all);
+
+// LED initialization function
+STATIC mp_obj_t Maix_apu_init_led(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    mp_arg_val_t args[MP_ARRAY_SIZE(Maix_apu_init_led_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(Maix_apu_init_led_args), Maix_apu_init_led_args, args);
+
+    // Get the arguments
+    int sk9822_dat = args[0].u_int;
+    int sk9822_clk = args[1].u_int;
+
+    // Initialize APU with default settings
+    lib_apu_init_led(sk9822_dat, sk9822_clk);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_KW(Maix_apu_init_led_obj, 0, Maix_apu_init_led);
+
+
+STATIC mp_obj_t Maix_apu_set_led(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_degree,        MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_color,         MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_delay,         MP_ARG_INT, {.u_int = 0} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    uint32_t degree = args[0].u_int;
+    uint32_t color  = args[1].u_int;
+    uint32_t delay  = args[2].u_int;
+
+    lib_apu_set_led(degree, color, delay);    
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_KW(Maix_apu_set_led_obj, 0, Maix_apu_set_led);
 
 // Initialize APU clock
 STATIC mp_obj_t Maix_apu_init_clock(mp_obj_t freq_obj) {
@@ -167,12 +205,28 @@ MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_dir_clear_ready_obj, Maix_apu_dir_clear_ready
 // Get direction with confidence level
 STATIC mp_obj_t Maix_apu_get_direction(void) {
     apu_dir_result_t result = lib_apu_get_direction();
-    mp_obj_t tuple[3] = {
+    
+    // Create a new list for samples
+    mp_obj_list_t *samples_list = MP_OBJ_TO_PTR(mp_obj_new_list(0, NULL));
+    for(int i = 0; i < APU_DIR_CHANNEL_SIZE; i++) {
+        mp_obj_list_append(samples_list, mp_obj_new_int(result.samples[i]));
+    }
+
+    // Create a new list for VOC samples
+    mp_obj_list_t *voc_samples_list = MP_OBJ_TO_PTR(mp_obj_new_list(0, NULL));
+    for(int i = 0; i < APU_DIR_CHANNEL_SIZE; i++) {
+        mp_obj_list_append(voc_samples_list, mp_obj_new_int(result.voc_samples[i]));
+    }
+    
+    mp_obj_t tuple[5] = {
         mp_obj_new_int(result.direction),
-        mp_obj_new_int(result.confidence),
-        mp_obj_new_int(result.power)
+        mp_obj_new_int(result.power),
+        mp_obj_new_int(result.voc_dir),
+        MP_OBJ_FROM_PTR(samples_list),
+        MP_OBJ_FROM_PTR(voc_samples_list),
+        
     };
-    return mp_obj_new_tuple(3, tuple);
+    return mp_obj_new_tuple(5, tuple);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_get_direction_obj, Maix_apu_get_direction);
 
@@ -419,12 +473,48 @@ STATIC mp_obj_t Maix_apu_init_i2s(mp_obj_t sample_rate_obj) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(Maix_apu_init_i2s_obj, Maix_apu_init_i2s);
 
+// Print current APU settings
+STATIC mp_obj_t Maix_apu_print_settings(void) {
+    lib_apu_print_setting();
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_print_settings_obj, Maix_apu_print_settings);
+
+// Initialize APU demo
+/*STATIC mp_obj_t Maix_apu_demo_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_enable_ppl, MP_ARG_INT, {.u_int = 1} },
+        { MP_QSTR_enable_irq, MP_ARG_INT, {.u_int = 1} },
+        { MP_QSTR_reinit_irq, MP_ARG_INT, {.u_int = 1} },
+        { MP_QSTR_reinit_all, MP_ARG_INT, {.u_int = 1} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+    
+    uint8_t enable_ppl = args[0].u_int;
+    uint8_t enable_irq = args[1].u_int;
+    uint8_t reinit_irq = args[2].u_int;
+    uint8_t reinit_all = args[3].u_int;
+    
+    apu_demo_init(enable_ppl, enable_irq, reinit_irq, reinit_all);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_KW(Maix_apu_demo_init_obj, 0, Maix_apu_demo_init);
+
+// Print current APU settings
+STATIC mp_obj_t Maix_apu_demo_run(void) {
+    apu_demo_run();
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(Maix_apu_demo_run_obj, Maix_apu_demo_run);*/
+
 // APU class methods
 STATIC const mp_rom_map_elem_t Maix_apu_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_APU) },
     
     // Initialization functions
-    { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&Maix_apu_init_obj) },
+    { MP_ROM_QSTR(MP_QSTR_init_all), MP_ROM_PTR(&Maix_apu_init_all_obj) },
+    { MP_ROM_QSTR(MP_QSTR_init_led), MP_ROM_PTR(&Maix_apu_init_led_obj) },
     { MP_ROM_QSTR(MP_QSTR_init_clock), MP_ROM_PTR(&Maix_apu_init_clock_obj) },
     { MP_ROM_QSTR(MP_QSTR_init_fpioa), MP_ROM_PTR(&Maix_apu_init_fpioa_obj) },
     { MP_ROM_QSTR(MP_QSTR_init_i2s), MP_ROM_PTR(&Maix_apu_init_i2s_obj) },
@@ -432,11 +522,16 @@ STATIC const mp_rom_map_elem_t Maix_apu_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_init_plic), MP_ROM_PTR(&Maix_apu_init_plic_obj) },
     
     // Direction detection methods
+    { MP_ROM_QSTR(MP_QSTR_set_led), MP_ROM_PTR(&Maix_apu_set_led_obj) },
     { MP_ROM_QSTR(MP_QSTR_configure_direction), MP_ROM_PTR(&Maix_apu_configure_direction_obj) },
     { MP_ROM_QSTR(MP_QSTR_start_direction_detection), MP_ROM_PTR(&Maix_apu_start_direction_detection_obj) },
     { MP_ROM_QSTR(MP_QSTR_dir_is_ready), MP_ROM_PTR(&Maix_apu_dir_is_ready_obj) },
     { MP_ROM_QSTR(MP_QSTR_get_direction), MP_ROM_PTR(&Maix_apu_get_direction_obj) },
     { MP_ROM_QSTR(MP_QSTR_dir_clear_ready), MP_ROM_PTR(&Maix_apu_dir_clear_ready_obj) },
+    { MP_ROM_QSTR(MP_QSTR_print_settings), MP_ROM_PTR(&Maix_apu_print_settings_obj) },
+
+    /*{ MP_ROM_QSTR(MP_QSTR_demo_init), MP_ROM_PTR(&Maix_apu_demo_init_obj) },
+    { MP_ROM_QSTR(MP_QSTR_demo_run), MP_ROM_PTR(&Maix_apu_demo_run_obj) },*/
     
     // Voice output methods
     { MP_ROM_QSTR(MP_QSTR_enable_voice_output), MP_ROM_PTR(&Maix_apu_enable_voice_output_obj) },
