@@ -470,8 +470,18 @@ if(CONFIG_COMPONENT_MICROPYTHON_ENABLE)
             DEPENDS gen_qstr_i_last
             VERBATIM
         )
-    add_custom_target(gen_mpy_cross  
-            COMMAND ${CMAKE_MAKE_PROGRAM} -C ${mpy_core_dir}/mpy-cross
+    add_custom_target(gen_mpy_cross
+            # CFLAGS_EXTRA (a hook mpy-cross's own Makefile already provides, see
+            # components/micropython/core/mpy-cross/Makefile) downgrades -Wdangling-pointer back to
+            # a warning for this host-side build tool only. That check was added in GCC 12 and flags
+            # py/stackctrl.c's mp_stack_ctrl_init() -- which deliberately stores a stack-local
+            # variable's address as a stack-depth marker, a standard, safe pattern GCC's new heuristic
+            # can't tell isn't a real dangling-pointer bug -- as a hard -Werror failure on newer host
+            # toolchains (e.g. current GitHub Actions ubuntu-latest) that didn't exist when this vendored
+            # MicroPython core (a git submodule) was last touched. Doesn't affect the actual K210 firmware
+            # build, which uses the separately-downloaded, older, pinned kendryte-toolchain, not the host
+            # compiler -- only this native build-time helper binary.
+            COMMAND ${CMAKE_MAKE_PROGRAM} -C ${mpy_core_dir}/mpy-cross CFLAGS_EXTRA=-Wno-error=dangling-pointer
             COMMENT "Generate mpy-cross ..."
         )
     separate_arguments(cmd_sed0 NATIVE_COMMAND "s/^Q(.*)/\"&\"/")
