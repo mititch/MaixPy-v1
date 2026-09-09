@@ -52,7 +52,10 @@ jobs:
       # checkout and is never pushed anywhere, so it can't touch the real repo's tag history and can't
       # trigger publish.yml's `push: tags: [v*]` auto-build.
       - name: tag build version (local to this run only, never pushed)
-        run: git tag -a ${{ inputs.version_tag }} -m "CI build version tag (ephemeral, never pushed)"
+        # Lightweight tag (no -a/-m) deliberately: an annotated tag creates a real git object with a
+        # tagger identity, which a fresh runner has none of ("Committer identity unknown" / exit 128).
+        # git describe's --tag flag (see update_build_info.py) already considers lightweight tags too.
+        run: git tag ${{ inputs.version_tag }}
 
       # Deliberately not using checkout's own `submodules: recursive` option: it shallow-clones
       # submodules, and one nested submodule (lwip, pulled in by the micropython core submodule) is
