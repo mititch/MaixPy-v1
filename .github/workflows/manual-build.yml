@@ -77,6 +77,13 @@ jobs:
           python project.py distclean
           python project.py build
 
+      # Prints the actual version values baked into this build -- the fields the MaixPy IDE reads
+      # (BUILD_VERSION_MAJOR/MINOR/DEV, feeding MICROPY_VERSION_MAJOR/MINOR/MICRO) are compiled in as
+      # raw integers, not a searchable string, so this is the only easy way to confirm the version_tag
+      # input actually took effect.
+      - name: show generated build version
+        run: cat projects/${{ inputs.project }}/build/config/global_build_info_version.h
+
       # Makes the built firmware downloadable from the run's "Artifacts" section -- otherwise the
       # .bin/.elf only ever exist inside this ephemeral runner and are lost when the job ends.
       - name: upload firmware artifact
