@@ -26,6 +26,11 @@ on:
           - maixpy_amigo_tft
           - maixpy_m5stickv
           - maixpy_twatch
+      version_tag:
+        description: 'Version tag to build with (local to this run only, never pushed -- the MaixPy IDE requires firmware >= 0.3.1 to connect at all; without any tag, git describe falls back to a bare hash and the build reports version 0.0.0)'
+        required: true
+        default: 'v0.6.4'
+        type: string
 
 jobs:
   build:
@@ -37,6 +42,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
+
+      # Firmware version (what the MaixPy IDE checks, minimum 0.3.1 to connect at all) comes from
+      # git describe via tools/kconfig/update_build_info.py, run as a real build dependency for
+      # every project (tools/cmake/compile.cmake:296-329). With no tag reachable, git describe falls
+      # back to a bare commit hash, the version-parsing regex never matches, and the build silently
+      # reports firmware version 0.0.0 -- which the IDE appears to treat as "not ready" and retries
+      # against until it gives up with a timeout. This tag exists ONLY inside this run's own ephemeral
+      # checkout and is never pushed anywhere, so it can't touch the real repo's tag history and can't
+      # trigger publish.yml's `push: tags: [v*]` auto-build.
+      - name: tag build version (local to this run only, never pushed)
+        run: git tag -a ${{ inputs.version_tag }} -m "CI build version tag (ephemeral, never pushed)"
 
       # Deliberately not using checkout's own `submodules: recursive` option: it shallow-clones
       # submodules, and one nested submodule (lwip, pulled in by the micropython core submodule) is
